@@ -1,0 +1,744 @@
+---
+title: "Estimated Delivery Date Prediction"
+author: "Khaled Jafar"
+date: "August 1, 2016"
+output: html_document
+---
+
+###**Project overview**: 
+The goal of this project is to create a machine learning algorithm that can be implemented real time into the order process to provide customers with the best delivery date target. The delivery date would be provided to the customer at the time the order is placed.
+ 
+###**Problem statement**: 
+The current method of setting the estimated delivery date for customer orders is a manual process that results in ~60% of orders arriving within the delivery window with a high number of orders arriving early to the customer site. Early order arrivals can create issues for customer especially when customers are not prepared to receive the orders.
+
+There have been several attempts to improve delivery date accuracy, but these attempts have resulted in only incremental improvements in our ability to deliver orders within the delivery window.  
+
+The goal of this project is to leverage key information about the order, customer, payment process, manufacturing process and logistics network to provide the customer with the most accurate delivery date. The approach will be to understand which variables (over 100 variables are collected at time of order receipt) have the greatest impact on delivery date and to build a model that utilizes the most impactful variables to accurately predict delivery date more than 80% of the time without a negative impact to late deliveries.
+ 
+###**Metrics**:
+ 
+The key metrics that will be used to measure success of this project are the following:
+
+1. Order On-time %: % of orders that are delivered within the delivery date window provided to the customer. The desire is to have this number exceed 80%. This metric will be measured in the following way: (orders that are delivered within the delivery window communicated to the customer/ total orders)
+2. Order Late %: % of orders that are delivered late to the delivery date window provided to the customer. The desire is to have this number below 5%. This metric will be measured in the following way: (qty orders that are delivered late to delivery date communicated to the customer/ total orders)
+
+The analysis below will summarize the key variables as defined by the subject matter experts. Additional features were explored and those can be found in the appendix at the end of this report.
+
+The key variables to explore are the following:
+
+1. dayofweek: This represents the what hour of the day the order was placed
+2. SSC_Code: This represents if the order is pulled out of existing stock or if it is a custom build order
+3. local_ship_code_desc: This represents the delivery method to the customer (e.g. Next Day, 2nd Day, 3-5 Day standard delivery)
+4. order_revenue_amt: This represents the revenue of the order
+5. Build_Facility: This is the facility that the product will be built in. Will be NULL if the product is stocked off the shelf.
+6. Merge_Facility: Determine the facility location where an order requires to be merged with another product prior to delivery to the customer (if merge is required)
+7. Warehousing_Flag: Determines if a customer requested that we build and warehouse the product prior to delivering it
+8. Mfg_Lead_Time: The amount of time needed in manufacturing based on the part in the order that has the longest lead time 
+9. Freight_Lead_Time: The amount of time put aside for the logistics leg of the delivery to the customer
+10. Payment_Type: This represents how the customer will be paying for the order (e.g. credit card ...)
+
+
+
+###**DATA Wrangling**. 
+
+Below is a list of the steps that were taken to wrangle and prepare the data for analysis:
+
+1. Pulled in the required data from the SQL server into R
+2. Converted date columns into dates since some of them show up as factors
+3. Needed to create a new column for 1st attempt delivery date based on 2 other columns
+     + POI_Delivery_Date_1st_Attempt_SD_DD 
+     + Delivery_Attempt_1. 
+The first step was to take the date from POI_Delivery_Date_1st_Attempt_SD_DD when it is not null and then take the date from Delivery_Attempt_1 column when the date in POI_Delivery_Date_1st_Attempt_SD_DD is null
+4. Calculated the number of business days delta for the for the following:
+    + From Order Date to Estimated Delivery Date (EDD)
+    + From Order Date to 1st attempt delivery date
+5. Calculated the business day delta between (Order Date - Delivery Date) - (Order Date - Estimated Delivery Date) to figure out when something is Late how many business days is Late and the same for Early.
+6. Determined if each order is currently Early, Ontime or Late using window range rules 
+
+
+###**Data Overview**.
+Below is the data exploration of each of the key variables.  Each categorical variable was plotted using a boxplot to determine the distribution of each variable in regards to the target variable and to determine if there was a difference between the BTS and BTO supply chains. The numerical variables we plotted using a scatter plot against the target variable.
+
+In addition correlation plots were used to determine if there was correlation between numerical variables while ANOVA was used for categorical variables.
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+# Read in the data and filter out any orders with out a delivery date (Range_Delivery_Outcome != "No condition met") and plot the first key variable Order_DT_Day_of_Week,fill = Range_Delivery_Outcome#
+LT_data <- read.csv(file= "LT_data.csv", header = TRUE, sep = ",")
+library(ggplot2)
+library(ggthemes)
+library(GGally)
+library(dplyr)
+LT_data$dayofweek <- factor(LT_data$dayofweek, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+
+ggplot(LT_data, aes(x= dayofweek)) +
+  geom_bar(fill = "#2c7fb8") +
+  labs(title =  "Order Quantity by Day of Week for April 2015", x = "Order Day of Week", y = "Order Qty") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+Consistent volume on weekdays with a big drop on weekends (weekends have ~30% of the weekday order volume)
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x= dayofweek, y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot( ) +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) + 
+  labs(title =  "Box Plot by Day of Week for April 2015", x = "Order Day of Week", y = "Business Days to Delivery") + 
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+Client BTO consistently takes more time (as expected) thank Client BTS from order to delivery; for Client BTO Wed,Thursday and Friday has lower median but 3rd quartile similar to other days. Saturday is the exception with lower median and 3rd quartile. Possibly due to having more time to build and stage before Monday.
+
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data,  aes(x = reorder(SSC_Code, -table(SSC_Code)[SSC_Code]))) +
+  geom_bar(fill = "#2c7fb8") +
+  labs(title =  "Order Quantity by SSC_Code for April 2015", x = "SSC_Code", y = "Order Qty") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12, angle = 90, hjust = 1),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x = reorder(SSC_Code, -table(SSC_Code)[SSC_Code]), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(title =  "Box Plot by SSC_Code for April 2015", x = "SSC_Code", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12),axis.text.x = element_text(size=12, angle = 90, hjust = 1),axis.text.y = element_text(size=12),axis.title=element_text(size=14,face="bold"))
+```
+BTS has faster delivery time than BTO as expected
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x = reorder(local_ship_code_desc,-table(local_ship_code_desc)[local_ship_code_desc]))) +
+  geom_bar(fill = "#2c7fb8") +
+  labs(title =  "Order Quantity by Delivery Method for April 2015", x = "Delivery Method", y = "Order Qty") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12, angle = 90, hjust = 1),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold")) 
+```
+
+Majority of orders ~63% are through 3-5 days standard ground. 2nd Day and Next Day  service round out the top 3 for a combined ~90% of all order deliveries.
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x = reorder(local_ship_code_desc,-table(local_ship_code_desc)[local_ship_code_desc]), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(title =  "Box Plot by Delivery Method for April 2015", x = "Delivery Method", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12),axis.text.x = element_text(size=12, angle = 90, hjust = 1),axis.text.y = element_text(size=12),axis.title=element_text(size=14,face="bold"))
+```
+
+I found Delivery method to be interesting as I would have expected a bigger gap between 3 to 5 days ship method and 2 day ship method The median is lower on 2 day but the 25% to 75% is very similar. Next Day is lower as you would expect. This may be an area to explore
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(order_revenue_amt <= 5000), aes(x = order_revenue_amt)) +
+  geom_histogram(binwidth = 100) +
+  labs(title =  "Order Quantity by Revenue for April 2015", x = "Revenue Bin", y = "Order Qty") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+Majority of Orders are under $2K
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(order_revenue_amt <= 5000), aes(x = order_revenue_amt, y = bizdaysdeliv, col = Wkly_Scorecard_LOB_SSC_Grouping )) +
+  geom_point(alpha = 0.5, size = 2) +
+  geom_jitter()  +
+  geom_smooth(method = "lm", se = FALSE, col = "Blue", size=2) +
+  labs(title =  "Scatter Plot for Business Days to Delivery vs. Order Revenue for April 2015", x = "Revenue per Order", y = "Business Days to Delivery") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+As expected Client BTS has lower business days across price points.
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(order_revenue_amt <= 5000), aes(x = order_revenue_amt, y = bizdaysdeliv,)) +
+  geom_point(alpha = 0.5, size = 2) +
+  geom_jitter()  +
+  facet_grid(. ~ Wkly_Scorecard_LOB_SSC_Grouping) +
+  geom_smooth(method = "lm", se = FALSE, col = "Blue", size=2) +
+  labs(title =  "Scatter Plot for Business Days to Delivery vs. Order Revenue for April 2015", x = "Revenue per Order", y = "Business Days to Delivery") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(Build_Facility != "NA"), aes(x= as.factor(Build_Facility), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) + 
+  labs(title =  "Box Plot by Build Facility for April 2015", x = "Build Facility", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+3 Build facilities (CCC6, CTY and PTY) have the longest time to delivery. 
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(Merge_Facility != "NA"), aes(x= as.factor(Merge_Facility), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 30)) + 
+  labs(title =  "Box Plot by Merge Facility for April 2015", x = "Merge Facility", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+BTO is consistently higher in business days to delivery across merge facilities while the FG1 merge facility has the highest number of days to delivery
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(Warehousing_Flag != "NA"), aes(x= as.factor(Warehousing_Flag), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 30)) + 
+  labs(title =  "Box Plot by Warehousing Flag for April 2015", x = "Warehousing Flag", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+Those orders that are marked for warehousing have a mean of ~ 9 days longer delivery for BTO and ~ 7 days for BTS orders.
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x = Mfg_Lead_Time, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_histogram(binwidth = 1, position = "dodge", alpha = 0.5) +
+  labs(title =  "Order Quantity by Manufacturing Lead Time", x = "Manufacturing Lead Time", y = "Order Qty") +   theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+BTS has a larger number of orders with a lower manufacturing lead time while BTO seems to be bi-modal with longer manufacturing lead time than BTS orders.
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x = Freight_Lead_Time, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_histogram(binwidth = 1, position = "dodge", alpha = 0.5) +
+  labs(title =  "Order Quantity by Freight Lead Time", x = "Freight Lead Time", y = "Order Qty") +   theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+Client BTO orders are skewed to the right when it comes to the number of days for logistics while BTS is more normally distributed.
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(Payment_Type != "NA"), aes(x= as.factor(Payment_Type), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) + 
+  labs(title =  "Box Plot by Payment Type for April 2015", x = "Payment Type", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+Some differences across payment types. #, 5, P and W payment types stand out.
+
+
+
+
+
+```{r fig.width=10, fig.height=10, echo=FALSE, warning=FALSE, message = FALSE}
+library(caTools) # for subsetting the data
+library(caret) # great package for modeling
+library(rpart) # decision tree modeling
+library(randomForest) # modeling random forest
+LTdata <- read.csv(file= "LTdata.csv", header = TRUE, sep = ",")
+# Split-out validation dataset
+
+set.seed(7)
+validationIndex <- createDataPartition(LTdata$bizdaysdeliv, p=0.05, list=FALSE)
+# select 20% of the data for validation
+test <- LTdata[-validationIndex,]
+# use the remaining 80% of data to training and testing the models
+train <- LTdata[validationIndex,]
+
+
+# another way to split data into training and validation/test
+#set.seed(101) 
+#sample <- sample.split(LTdata$bizdaysdeliv, SplitRatio = .05)
+#train <- subset(LTdata, sample == TRUE)
+#test <-  subset(LTdata, sample == FALSE)
+
+fit.rfvariable <- randomForest(bizdaysdeliv ~ LCL_ORD_SRC_CD +  Mfg_Lead_Time + Pay_Lead_Time + Freight_Lead_Time + dayofweek +  SDS_NBD_Flag + Sys_Qty + order_revenue_amt + Delivery_Promise_Flag + Wkly_Scorecard_LOB_SSC_Grouping + Product_Desc + SSC_Code + Src_Channel + local_ship_code_desc + CS_Flag +  Warehousing_Flag + second_touch_flag + Large_Order_Flag + CFI_FLG + Merge_Facility +  Build_Facility + Direct_Ship_Flag + Purchase_Channel + QTE_SRC_APP_NM + Payment_Type, ntree = 25, data = train)
+
+# Variable Importance Plot
+varImpPlot(fit.rfvariable,
+           sort = T,
+           main="Variable Importance",
+           n.var=25)
+```
+
+After splitting the data into a training set (80% of the observations) and a test set (20% of observations), a Random Forest model was used as a first pass to determine variable importance.  From the Random Forest model we see that  Mfg_Lead_Time, Build_Facility, SSC_Code, local_ship_code_desc, order_revenue_amt are the top 5 variables in terms of importance to delivery days.
+
+
+
+
+
+```{r fig.width=10, fig.height=12, echo=FALSE, warning=FALSE, message = FALSE}
+# calculate correlation matrix
+LTdata <- read.csv(file= "LTdata.csv", header = TRUE, sep = ",")
+library(corrplot) # for plotting correlations
+LTcorall <- cor(LTdata[c("Src_Channel", "Sys_Qty", "order_revenue_amt", "CS_Flag","Warehousing_Flag", "second_touch_flag", "Large_Order_Flag","Pay_Lead_Time", "Mfg_Lead_Time", "Freight_Lead_Time","bizdaysdeliv")]) # If just want to do correlations on certain fields:  
+corrplot(LTcorall, method="number", type="upper")
+```
+
+Focusing on the target variable (bizdaysdeliv), we find that Mfg_Lead_Time has a strong correlation to it at 0.67 followed by Warehousing_Flag and second_touch_flag both at 0.43.  However, we can also see that Warehousing_Flag and second_touch_flag are highly correlated to one another, and since we met with the business process subject matter experts we determined that Warehousing_Flag would be the one to keep in the model. Another strong correlation between independent features is Sys_Qty to order_revenue_amt and to Large_Order_Flag. Again based on the deep understanding of the process, we will only use Sys_Qty in our prediction model.
+
+![](Anova.png)
+
+ANOVA was used to understand the relation of the categorical variables and the target variable. ANOVA showed that the product related features (Product_Desc, SSC_CD and Wkly_Scorecard_LOB_SSC_Grouping), the shipment method and CFI flag were all big impact items as well.
+
+
+###**Feature Selection**: 
+With over 50 features to choose from, the next step was to determine which features had the largest impact on the target variable (quantity of business days from order date to delivery date) and to ensure that the correlation between nominal features was well understood as well as the relation between the categorical variables and the target variable using ANOVA.
+
+###**Modeling**:
+
+Since we are trying to predict the number of business days from order date to delivery date, we need to use a regression modeling technique to do this kind of prediction (vs. using a classification modeling technique). The first step used was to spot check several algorithms and determine how well they would perform on the training data. RMSE and R-squared were used as the key metrics in identifying the model(s) that performed best on the training data. Below is a summary of each model's performance. GBM was found to have the best performance with the lowest RMSE of 1.67 days and an R squared value of ~0.71. 
+
+![](ModelSpotCheck.jpg)
+
+###**Model Tuning**:
+
+The GBM model was then tuned against the test data set using 3 parameters: We can tune over the number of trees (i.e., boosting iterations), the complexity of the tree (indexed by interaction.depth) and the learning rate (also known as shrinkage). A gmb.grid was used to test multiple combinations of these 3 parameters testing against the on-time performance and late performance when using the business days to delivery. The results showed that 250 trees with an interaction depth of 5 and shrinkage of 0.05 would be an optimal parameters to use.
+
+![](GBMtuning.jpg)
+
+
+
+
+###** Utilizing these parameters we ran the model against the test data and found that ontime performance improved from 64.4% to 76.8% (~19% improvement over the current process performance) Reaching this level performace included adding 1 extra business day to the model prediction**
+
+![](ActualvsModel.jpg)
+
+
+A few key feature were found to have significant impact on the target variable. Manufacturing Lead Time which determines the time required for the parts needed to build the system, Build Facility (determines physical location of build facility), SSC code meaning if the order can pulled from stock or will require special build, and customer shipment method were found to be among the key features. 
+
+These features were applied against multiple models and GBM was found to have the best performance. The model was tuned to 250 trees with an interaction depth of 5 and shrinkage of 0.05 for the optimal parameters. Utilizing this model we were able to improve performance by 19% from 64.4% ontime delivery to 76.8%. 
+
+We did find that in some cases by improving on-time performance we saw degradation in late performance which could have a potential negative impact on customer experience. 
+
+One of the limitation is that the current order delivery process has high variability due to multiple sources of process variation. In order to get the best ontime performance, it will require that we deploy this model but also to reduce or eliminate the in the process variation. 
+
+
+###**Next Steps**:
+The key next steps include the following:
+ 
+1. Determine if we can better set the window range used to communicate delivery times to our customers based on more probabilistic range logic using a probability density function. We will need to ensure that any new range logic is competitive and acceptable to our customer base.
+2. Integrate the tuned GBM model into our real time process workflow
+3. Monitor model performance and continue to tune it as needed
+
+
+###**Appendix**:
+
+
+###**Clustering**:
+One thought was to cluster the order data to determine if there were unique and meaningful clusters that could be identified and then build predictive models for each cluster to see if we could improve ontime performance.  
+
+Since the features used were mixed of mixed types (e.g.nominal and factor, all the pairwise dissimilarities (distances) between observations in the data set were calculated using "gower" distance. A hierarchical clustering algorithm was used.
+
+To determine the optimal number of clusters, a silhouette width was calculated. 5 clusters were found to be the optimal number.
+
+![](Clusternumber.jpg)
+
+
+In order to better understand each cluster, they were plotted and analyzed. Clusters 1, 2 consisted of BTO product that were non CFI while cluster 3 was heavy BTO product with CFI. Cluster 4 was found to be mainly composed of BTS.
+
+
+![](clustercompare1.jpg)
+
+
+In order to determine the difference between clusters 1 & 2, they were further analyzed and it was found that cluster 1 was made up mainly 3-5 day shipment method while cluster 2 was composed more of premium next day and 2nd day shipment.
+
+![](clustercompare2.jpg)
+
+
+The idea was to split the data into BTO and BTS populations to determine if different models would work better on BTO vs. BTS, but in the end GBM was found to have the best performance for both BTS and BTO populations.
+
+![](Clusterperf.jpg)
+
+Clusters 1 & 2 both BTO showed similar performance while Cluster 4 (BTS) showed lower on-time performance as expected. The CFI BTO cluster #3 showed a little worse performance than the non CFI BTO clusters (1 & 2).
+
+
+
+Other features that were considered included the following. These features were explored with findings below:
+
+1. Order_Entry_Hour_of_Day: This represents what day hour of the day the order was placed
+2. Wkly_Scorecard_LOB_SSC_Grouping: High level product category
+3. Product_Desc: This represents the type of product on the order 
+4. Delivery_Promise_Flag: This represents which IT system was used to determine the EDD
+5. Direct_Ship_Flag: This represents if the order will be directly shipped to the customer or if it requires to be merged at a merging facility prior to being shipped to the customer
+6. ShipTo_State_Province: This represents the US state the order is being delivered to
+7. PAY_1_CD: Represents primary method of payment for the order
+8. QTE_SR_APP_NM: Represents system used to create the quote before the order was submitted
+9. Purchase_Channel: This represents how the customer purchased the order( online, offline, etc...)
+10. second_touch_flag: This represents if the order required a second touch for added services prior to customer shipment which may cause delays
+11. CFI_FLG: Incremental services added in manufacturing prior to shipment to customer
+12. Sys_Qty : This represents the system quantity on the order
+13. Pay_Lead_Time: The amount of time put aside for the customer payment to complete processing
+14. LCL_ORD_SRC_CD: The source system that the order has been placed in
+15. Src_Channel : This is the channel number the customer belongs to 
+16. SDS_NBD_Flag: Determines if the order needs to be shipped the same day the order is placed or not
+17. CS_Flag: Determines if a custom service is required for the order
+18. Large_Order_Flag: Determines if an order is composed of a large number of systems or high revenue amount
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x= Order_Entry_Hour_of_Day)) +
+  geom_bar(fill = "#2c7fb8") +
+  labs(title =  "Order Quantity by Day of Hour of Day for April 2015", x = "Order Hour of Day", y = "Order Qty") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+Majority of orders take place between 8AM and 5PM
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(Order_Entry_Hour_of_Day != "NA"), aes(x= as.factor(Order_Entry_Hour_of_Day), y = bizdaysdeliv)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) + 
+  labs(title =  "Box Plot by Order Hour of Day for April 2015", x = "Order Hour of Day", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(Order_Entry_Hour_of_Day != "NA"), aes(x= as.factor(Order_Entry_Hour_of_Day), y = bizdaysdeliv, col = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(title =  "Box Plot by Order Hour of Day for April 2015", x = "Order Hour of Day", y = "Business Days to Delivery") + 
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+
+Another view by hour of Client BTO by hour of day, but see the consistent delta where BTO take more time than BTS as we would expect.
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data,  aes(x = reorder(Wkly_Scorecard_LOB_SSC_Grouping, -table(Wkly_Scorecard_LOB_SSC_Grouping)[Wkly_Scorecard_LOB_SSC_Grouping]))) +
+  geom_bar(fill = "#2c7fb8") +
+  labs(title =  "Order Quantity by Product Grouping for April 2015", x = "Product Grouping", y = "Order Qty") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12, angle = 90, hjust = 1),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x = reorder(Wkly_Scorecard_LOB_SSC_Grouping, -table(Wkly_Scorecard_LOB_SSC_Grouping)[Wkly_Scorecard_LOB_SSC_Grouping]), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(title =  "Box Plot by Product Type for April 2015", x = "Product Type", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12),axis.text.x = element_text(size=12, angle = 90, hjust = 1),axis.text.y = element_text(size=12),axis.title=element_text(size=14,face="bold"))
+```
+Client BTS has faster delivery time than Client BTO
+
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data,  aes(x = reorder(Product_Desc, -table(Product_Desc)[Product_Desc]))) +
+  geom_bar(fill = "#2c7fb8") +
+  labs(title =  "Order Quantity by Product for April 2015", x = "Product Description", y = "Order Qty") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12, angle = 90, hjust = 1),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+3 products (Latitude, OptiPlex Desktops and Personal Notebooks) driving ~70% of orders for the population.
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x = reorder(Product_Desc, -table(Product_Desc)[Product_Desc]), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(title =  "Box Plot by Product Type for April 2015", x = "Product Type", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12),axis.text.x = element_text(size=12, angle = 90, hjust = 1),axis.text.y = element_text(size=12),axis.title=element_text(size=14,face="bold"))
+```
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x = reorder(Delivery_Promise_Flag, -table(Delivery_Promise_Flag)[Delivery_Promise_Flag]))) +
+  geom_bar(fill = "#2c7fb8") +
+  labs(title =  "Order Quantity by EDD Model for April 2015", x = "EDD Model", y = "Order Qty") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+Delivery Promise orders is beginning to take on more importance as it now exceeds legacy orders.
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x = reorder(Delivery_Promise_Flag, -table(Delivery_Promise_Flag)[Delivery_Promise_Flag]), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(title =  "Box Plot by EDD Model for April 2015", x = "EDD Model", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12),axis.text.x = element_text(size=12), axis.text.y = element_text(size=12),axis.title=element_text(size=14,face="bold"))
+```
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+
+ggplot(LT_data %>% filter(Direct_Ship_Flag != "NA"), aes(x = reorder(Direct_Ship_Flag, -table(Direct_Ship_Flag)[Direct_Ship_Flag]))) +
+  geom_bar(fill = "#2c7fb8") +
+  labs(title =  "Order Quantity by Direct vs. Indirect Shipment to Customer for April 2015", x = "Direct Ship Flag", y = "Order Qty") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold")) 
+```
+
+Greater number of orders are directly shipped to the customer and not sent to a merge center prior to shipment. We have 29.7K orders with null values for this flag ...
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(Direct_Ship_Flag != "NA"), aes(x = reorder(Direct_Ship_Flag, -table(Direct_Ship_Flag)[Direct_Ship_Flag]), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(title =  "Box Plot by Direct vs. Indirect Shipment to Customer for April 2015", x = "Direct Ship Flag", y = "Business Days to Delivery") +
+  theme(axis.text.y=element_text(size=12),axis.text.x = element_text(size=12), axis.text.y = element_text(size=12),axis.title=element_text(size=14,face="bold"))
+```
+
+For non direct ship flag you see a higher number of business days for both BTO and BTS which is what you would expect since they are not being directly shipped to the customer
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x = reorder(ShipTo_State_Province, -table(ShipTo_State_Province)[ShipTo_State_Province]))) +
+  geom_bar(fill = "#2c7fb8") +
+  labs(title =  "Order Quantity by State for April 2015", x = "State", y = "Order Qty") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12, angle = 90, hjust = 1),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold")) 
+```
+
+California , Texas and Florida, and New York are the top 4 states that orders are delivered to.
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x = reorder(ShipTo_State_Province, -table(ShipTo_State_Province)[ShipTo_State_Province]), y = bizdaysdeliv)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(title =  "Box Plot by State for April 2015", x = "State", y = "Business Days to Delivery") +
+  theme(axis.text.y=element_text(size=12),axis.text.x = element_text(size=12, angle = 90, hjust = 1),axis.text.y = element_text(size=12),axis.title=element_text(size=14,face="bold"))
+```
+
+Florida (East Coast) runs faster than NY, TX and CA possibly due to the location of the distributions centers being closer to the east coast. State/Zip Code is likely to be a an important variable to consider.
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(PAY_1_CD != "NA"), aes(x = reorder(PAY_1_CD, -table(PAY_1_CD)[PAY_1_CD]))) +
+  geom_bar(fill = "#2c7fb8") +
+  labs(title =  "Order Quantity by Pay Code for April 2015", x = "Pay Code", y = "Order Qty") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12, angle = 90, hjust = 1),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold")) 
+```
+
+Pay Code Comments
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(PAY_1_CD != "NA"), aes(x = reorder(PAY_1_CD, -table(PAY_1_CD)[PAY_1_CD]), y = bizdaysdeliv)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(title =  "Box Plot by Pay Code for April 2015", x = "Pay Code", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12),axis.text.x = element_text(size=12, angle = 90, hjust = 1), axis.text.y = element_text(size=12),axis.title=element_text(size=14,face="bold"))
+```
+
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(QTE_SRC_APP_NM != "NA"), aes(x = reorder(QTE_SRC_APP_NM, -table(QTE_SRC_APP_NM)[QTE_SRC_APP_NM]))) +
+  geom_bar(fill = "#2c7fb8") +
+  labs(title =  "Order Quantity by Quote System for April 2015", x = "Quote System", y = "Order Qty") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold")) 
+```
+
+Quote System Comments
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(QTE_SRC_APP_NM != "NA"), aes(x = reorder(QTE_SRC_APP_NM, -table(QTE_SRC_APP_NM)[QTE_SRC_APP_NM]), y = bizdaysdeliv)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(title =  "Box Plot by Quote System for April 2015", x = "Quote System", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12),axis.text.x = element_text(size=12), axis.text.y = element_text(size=12),axis.title=element_text(size=14,face="bold"))
+```
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(Purchase_Channel != "NA"), aes(x = reorder(Purchase_Channel, -table(Purchase_Channel)[Purchase_Channel]))) +
+  geom_bar(fill = "#2c7fb8") +
+  labs(title =  "Order Quantity by Purchase Path for April 2015", x = "Purchase Path", y = "Order Qty") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+4 key purchase paths drive the majority of the orders; need to investigate NA values
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(Purchase_Channel != "NA"), aes(x = reorder(Purchase_Channel, -table(Purchase_Channel)[Purchase_Channel]), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(title =  "Box Plot by Purchase Path for April 2015", x = "Purchase Path", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12),axis.text.x = element_text(size=12), axis.text.y = element_text(size=12),axis.title=element_text(size=14,face="bold"))
+```
+
+B2BGC and OB2GC purchase paths for BTS have a higher number of biz days
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x = second_touch_flag)) +
+  geom_bar(fill = "#2c7fb8") +
+  labs(title =  "Order Quantity by Touch Flag for April 2015", x = "Second Touch Flag", y = "Order Qty") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold")) 
+```
+
+Very few orders ~1% of orders have a second touch applied to them.
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x= second_touch_flag, y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(title =  "Box Plot by Touch Flag for April 2015", x = "Second Touch Flag", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12),axis.text.x = element_text(size=12), axis.text.y = element_text(size=12),axis.title=element_text(size=14,face="bold"))
+```
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(CFI_FLG != "NA"), aes(x = reorder(CFI_FLG, -table(CFI_FLG)[CFI_FLG]))) +
+  geom_bar(fill = "#2c7fb8") +
+  labs(title =  "Order Quantity by Touch Flag for April 2015", x = "CFI FLAG", y = "Order Qty") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold")) 
+```
+
+CFI Flag Comments
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(CFI_FLG != "NA"), aes(x = reorder(CFI_FLG, -table(CFI_FLG)[CFI_FLG]), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(title =  "Box Plot by CFI FLAG for April 2015", x = "CFI FLAG", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12),axis.text.x = element_text(size=12), axis.text.y = element_text(size=12),axis.title=element_text(size=14,face="bold"))
+```
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(Sys_Qty < 50), aes(x = Sys_Qty)) +
+  geom_histogram(binwidth = 1) +
+  labs(title =  "Order Quantity by System Qty for April 2015", x = "System QTY Bin", y = "Order Qty") +   theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+Almost 80% of order have only 1 system on them. Interesting data point at system quantity = 48.
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(Sys_Qty < 50), aes(x = Sys_Qty, y = bizdaysdeliv, col = Wkly_Scorecard_LOB_SSC_Grouping )) +
+  geom_point(alpha = 0.5, size = 2) +
+  geom_jitter()  +
+  geom_smooth(method = "lm", se = FALSE, col = "Blue", size=2) +
+  labs(title =  "Scatter Plot for Business Days to Delivery vs. Order System Qty for April 2015", x = "System Qty oper Order", y = "Business Days to Delivery") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(Sys_Qty < 50), aes(x = Sys_Qty, y = bizdaysdeliv,)) +
+  geom_point(alpha = 0.5, size = 2) +
+  geom_jitter()  +
+  facet_grid(. ~ Wkly_Scorecard_LOB_SSC_Grouping) +
+  geom_smooth(method = "lm", se = FALSE, col = "Blue", size=2) +  
+labs(title =  "Scatter Plot for Business Days to Delivery vs. Order System Qty for April 2015", x = "System Qty oper Order", y = "Business Days to Delivery") + 
+  theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+It looks like the more systems on an order the more time it takes per the scatter plot  
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x = Pay_Lead_Time, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_histogram(binwidth = 1, position = "dodge", alpha = 0.5) +
+  labs(title =  "Order Quantity by Payment Lead Time", x = "Payment Lead Time", y = "Order Qty") +   theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+Most orders have a payment lead time of 0 days meaning the payment is expected to clear on the same day of the order.
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(LCL_ORD_SRC_CD != "NA"), aes(x= as.factor(LCL_ORD_SRC_CD), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) + 
+  labs(title =  "Box Plot by LCL_ORD_SRC_CD for April 2015", x = "LCL_ORD_SRC_CD", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+BTS consistently lower number of business days than BTO.
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(Src_Channel != "NA"), aes(x= as.factor(Src_Channel), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 30)) + 
+  labs(title =  "Box Plot by Source Channel for April 2015", x = "Source Channel", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+Some variation by customer local channel. Local channel 41 is interesting as well as 9 for BTS. 85-88 show an increase in BTO when compared to other channels.
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(SDS_NBD_Flag != "NA"), aes(x= as.factor(SDS_NBD_Flag), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) + 
+  labs(title =  "Box Plot by SDS/NBD Flag for April 2015", x = "SDS/NBD Flag", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+As expected SDS shipment has lower business days in BTS but it's surprising to see how high it is for BTO.
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(CS_Flag != "NA"), aes(x= as.factor(CS_Flag), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) + 
+  labs(title =  "Box Plot by CS Flag for April 2015", x = "CS Flag", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+When we have a custom service on the order, it results in a higher number of days to delivery.
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(Large_Order_Flag != "NA"), aes(x= as.factor(Large_Order_Flag), y = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_boxplot() +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=88, size=6,show_guide = FALSE) +
+  coord_cartesian(ylim = c(0, 15)) + 
+  labs(title =  "Box Plot by Large Order Flag for April 2015", x = "Large Order Flag", y = "Business Days to Delivery") +
+  theme(legend.position = "bottom", axis.text.y=element_text(size=12), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+Large orders (system quantity or revenue) take longer to deliver.
+
+  
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x = bizdaysdeliv)) +
+  geom_histogram(binwidth = 1) +
+  labs(title =  "Order Quantity by Number of Business Days for Order Date to 1st Attempt Delivery Date", x = "Business Days from Order Date to 1st Delivery Attempt", y = "Order Qty") +   theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+Mean number of business days from Order Date to 1st attempt Delivery Date is 5.1 Days, Median is 5 days, with 1st quartile at 3 days and 3rd quartile at 6 days. It seems that there may be a binomial distributions (Client BTS vs. Client BTO)
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data, aes(x = bizdaysdeliv, fill = Wkly_Scorecard_LOB_SSC_Grouping)) +
+  geom_histogram(binwidth = 1, position = "dodge", alpha = 0.5) +
+  labs(title =  "Order Quantity by Number of Business Days for Order Date to 1st Attempt Delivery Date", x = "Business Days from Order Date to 1st Delivery Attempt", y = "Order Qty") +   theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+Client BTS has a faster cycle time from order date to 1st attempt delivery date thank Client BTO. Mean days for Client BTS is 2.5 days vs. 6.1 days for Client BTO (median of 2 days vs. 6 days; standard deviation of 3 days vs. 1.5 days)
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(DeliveryOutcomeWindowRange == "EARLY"), aes(x = deltabizdays)) +
+  geom_histogram(binwidth = 1) +
+  labs(title =  "Qty Days EARLY Histogram", x = "Business Days Early", y = "Order Qty") +   theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+Early deliveries arrive on average -5.3 business days before the date communicated to the customer (median = - 5 days) standard deb is 3.6 days
+
+
+```{r fig.width=10, fig.height=7, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot(LT_data %>% filter(DeliveryOutcomeWindowRange == "LATE"), aes(x = deltabizdays)) +
+  geom_histogram(binwidth = 1) +
+  labs(title =  "Qty Days LATE Histogram", x = "Business Days Late", y = "Order Qty") +   theme(axis.text.y=element_blank(), axis.text.x = element_text(size=12),axis.text.y = element_text(size=12),   axis.title=element_text(size=14,face="bold"))
+```
+
+Late deliveries arrive on average + 2.7 business days after the date communicated to the customer (median = +2 days) standard dev is 2.5 days.
